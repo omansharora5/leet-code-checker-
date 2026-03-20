@@ -3,6 +3,14 @@ import asyncio
 import httpx
 from pydantic import BaseModel
 
+JOB_BENCHMARKS = {
+    "Frontend Developer": 400.0,
+    "Backend Developer": 800.0,
+    "Senior Software Engineer": 1200.0,
+    "Quantitative Researcher": 1600.0,
+    "Default": 800.0
+}
+
 class RawStats(BaseModel):
     easy: int
     medium: int
@@ -17,6 +25,8 @@ class ScoreBreakdown(BaseModel):
 
 class ACDSEvaluation(BaseModel):
     username: str
+    job_type: str
+    target_score: float
     raw_stats: RawStats
     scoring_breakdown: ScoreBreakdown
     job_fitness_percent: float
@@ -40,7 +50,7 @@ def extract_username(profile_input: str) -> str:
     # If no URL match is found, assume the input itself is the direct username
     return profile_input
 
-async def evaluate_candidate(profile_input: str) -> ACDSEvaluation:
+async def evaluate_candidate(profile_input: str, job_type: str = "Default") -> ACDSEvaluation:
     """
     Fetches a candidate's LeetCode stats from the public API and evaluates their fitness
     based on the Algorithmic Competency & Depth Score (ACDS).
@@ -83,16 +93,24 @@ async def evaluate_candidate(profile_input: str) -> ACDSEvaluation:
     
     # 3. Depth Multiplier: Reward users who tackle hard problems relative to medium ones
     hard_ratio = hard / (medium + 1.0)
-    depth_multiplier = min(1.0 + (hard_ratio * 2.0), 1.5)
+    raw_multiplier = min(1.0 + (hard_ratio * 2.0), 1.5)
+    
+    # Confidence Factor: Require at least 10 medium/hard problems to unlock the full multiplier bonus
+    meaningful_problems = medium + hard
+    confidence_factor = min(meaningful_problems / 10.0, 1.0)
+    depth_multiplier = 1.0 + ((raw_multiplier - 1.0) * confidence_factor)
     
     # 4. Final Raw Score
     final_raw_score = base_score * depth_multiplier
     
-    # 5. Job Fitness Percentage: Benchmarked against a target score of 800
-    fitness_percent = min((final_raw_score / 800.0) * 100.0, 100.0)
+    # 5. Job Fitness Percentage: Benchmarked against a target score based on job type
+    target_score = JOB_BENCHMARKS.get(job_type, 800.0)
+    fitness_percent = min((final_raw_score / target_score) * 100.0, 100.0)
     
     return ACDSEvaluation(
         username=username,
+        job_type=job_type,
+        target_score=target_score,
         raw_stats=RawStats(easy=easy, medium=medium, hard=hard),
         scoring_breakdown=ScoreBreakdown(
             effective_easies=round(effective_easies, 2),
@@ -118,9 +136,19 @@ async def main():
         print("No input provided. Exiting.")
         return
         
-    print(f"\nEvaluating: '{user_input}'...")
+    print("\nAvailable Job Types:")
+    job_keys = list(JOB_BENCHMARKS.keys())
+    for idx, job in enumerate(job_keys, 1):
+        print(f"{idx}. {job} (Target Score: {JOB_BENCHMARKS[job]})")
+        
+    job_choice = input(f"\nSelect a job type by number [1-{len(job_keys)}] (or press Enter for Default): ").strip()
+    job_type = "Default"
+    if job_choice.isdigit() and 1 <= int(job_choice) <= len(job_keys):
+        job_type = job_keys[int(job_choice) - 1]
+
+    print(f"\nEvaluating '{user_input}' for '{job_type}'...")
     try:
-        evaluation = await evaluate_candidate(user_input)
+        evaluation = await evaluate_candidate(user_input, job_type)
         print("Status: SUCCESS\n")
         print(evaluation.model_dump_json(indent=2))
     except Exception as e:
